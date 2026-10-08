@@ -4,6 +4,7 @@
 
 #include "photon/pt/geom/triangle_intersect.h"
 #include "photon/pt/scene.h"
+#include "photon/pt/work_order.h"
 
 #include <cstdio>
 #include <stdexcept>
@@ -15,6 +16,31 @@ namespace {
 void embree_error_handler(void *, const RTCError code, const char *str)
 {
   std::fprintf(stderr, "[photon][embree] error %d: %s\n", int(code), str ? str : "(null)");
+}
+
+// Host view of the data of `view`. When Kokkos keeps its views in host memory
+// this is the view itself, otherwise the data is copied to `staging`.
+template <typename HostView, typename AnyView>
+HostView host_view_of(const AnyView &view, HostView &staging, bool copy_data)
+{
+  if constexpr (Kokkos::SpaceAccessibility<Kokkos::HostSpace, typename AnyView::memory_space>::assignable) {
+    return view;
+  } else {
+    if (staging.extent(0) != view.extent(0))
+      staging = HostView("emb_staging", view.extent(0));
+    if (copy_data)
+      Kokkos::deep_copy(staging, view);
+    return staging;
+  }
+}
+
+// Copies results from the staging view back, unless host_view_of() returned
+// the view itself.
+template <typename HostView, typename AnyView>
+void copy_back(const AnyView &view, const HostView &host)
+{
+  if constexpr (!Kokkos::SpaceAccessibility<Kokkos::HostSpace, typename AnyView::memory_space>::assignable)
+    Kokkos::deep_copy(view, host);
 }
 
 inline Vec3 normalize_safe(const Vec3 v)
@@ -114,14 +140,7 @@ void EmbreeBackend::build_accel(const Scene &scene)
 
 void EmbreeBackend::ensure_buffers(u32 n)
 {
-  if (n <= m_buf_size)
-    return;
-  m_ray_org_h = Kokkos::View<Vec3 *, Kokkos::HostSpace>("emb_org", n);
-  m_ray_dir_h = Kokkos::View<Vec3 *, Kokkos::HostSpace>("emb_dir", n);
-  m_ray_tmin_h = Kokkos::View<f32 *, Kokkos::HostSpace>("emb_tmin", n);
-  m_ray_tmax_h = Kokkos::View<f32 *, Kokkos::HostSpace>("emb_tmax", n);
-  m_hit_h = Kokkos::View<HitResult *, Kokkos::HostSpace>("emb_hit", n);
-  m_occ_h = Kokkos::View<u32 *, Kokkos::HostSpace>("emb_occ", n);
+  // The staging views are (re)allocated by host_view_of() when they are needed.
   m_buf_size = n;
 }
 
@@ -136,87 +155,112 @@ void EmbreeBackend::trace_closest(const RayBatch &rays, HitBatch &hits)
     throw std::runtime_error("HitBatch.count must match RayBatch.count");
   }
 
-  ensure_buffers(n);
-  Kokkos::deep_copy(m_ray_org_h, rays.origins);
-  Kokkos::deep_copy(m_ray_dir_h, rays.directions);
-  Kokkos::deep_copy(m_ray_tmin_h, rays.tmin);
-  Kokkos::deep_copy(m_ray_tmax_h, rays.tmax);
+  // Local copies: the kernel must not capture `this`.
+  const RTCScene scene = m_scene;
+  const auto org_h = host_view_of(rays.origins, m_ray_org_h, true);
+  const auto dir_h = host_view_of(rays.directions, m_ray_dir_h, true);
+  const auto tmin_h = host_view_of(rays.tmin, m_ray_tmin_h, true);
+  const auto tmax_h = host_view_of(rays.tmax, m_ray_tmax_h, true);
+  const auto hit_h = host_view_of(hits.hits, m_hit_h, false);
+  const auto positions_h = m_positions_h;
+  const auto indices_h = m_indices_h;
+  const auto normals_h = m_normals_h;
+  const auto texcoords_h = m_texcoords_h;
+  const auto material_ids_h = m_material_ids_h;
+  const auto vertex_colors_h = m_vertex_colors_h;
+  const bool has_normals = m_has_normals;
+  const bool has_texcoords = m_has_texcoords;
+  const bool has_material_ids = m_has_material_ids;
+  const bool has_vertex_colors = m_has_vertex_colors;
 
-  const auto &org_h = m_ray_org_h;
-  const auto &dir_h = m_ray_dir_h;
-  const auto &tmin_h = m_ray_tmin_h;
-  const auto &tmax_h = m_ray_tmax_h;
-  auto &hit_h = m_hit_h;
+  // Embree is thread safe: the rays are traced on all host threads, in an
+  // order that balances their load (the active rays are neighbours).
+  const WorkOrder order(n);
+  Kokkos::parallel_for(
+      "embree_trace_closest",
+      Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace>(0, int(order.range())),
+      [=](const int work_index) {
+        const int i = order.item(work_index);
+        if (i < 0)
+          return;
+        const f32 tnear = tmin_h(i);
+        const f32 tfar = tmax_h(i);
+        if (!(tfar > tnear)) {
+          // Inactive ray: only the flag is written.
+          hit_h(i).hit = false;
+          return;
+        }
+        HitResult hr{};
 
-  for (u32 i = 0; i < n; ++i) {
-    RTCRayHit rh{};
-    rh.ray.org_x = org_h(i).x;
-    rh.ray.org_y = org_h(i).y;
-    rh.ray.org_z = org_h(i).z;
-    rh.ray.dir_x = dir_h(i).x;
-    rh.ray.dir_y = dir_h(i).y;
-    rh.ray.dir_z = dir_h(i).z;
-    rh.ray.tnear = tmin_h(i);
-    rh.ray.tfar = tmax_h(i);
-    rh.ray.mask = 0xFFFFFFFFu;
-    rh.ray.flags = 0;
+        RTCRayHit rh{};
+        rh.ray.org_x = org_h(i).x;
+        rh.ray.org_y = org_h(i).y;
+        rh.ray.org_z = org_h(i).z;
+        rh.ray.dir_x = dir_h(i).x;
+        rh.ray.dir_y = dir_h(i).y;
+        rh.ray.dir_z = dir_h(i).z;
+        rh.ray.tnear = tnear;
+        rh.ray.tfar = tfar;
+        rh.ray.mask = 0xFFFFFFFFu;
+        rh.ray.flags = 0;
 
-    rh.hit.geomID = RTC_INVALID_GEOMETRY_ID;
-    rh.hit.primID = RTC_INVALID_GEOMETRY_ID;
+        rh.hit.geomID = RTC_INVALID_GEOMETRY_ID;
+        rh.hit.primID = RTC_INVALID_GEOMETRY_ID;
 
-    rtcIntersect1(m_scene, &rh, nullptr);
+        rtcIntersect1(scene, &rh, nullptr);
 
-    HitResult hr{};
-    hr.hit = (rh.hit.geomID != RTC_INVALID_GEOMETRY_ID);
-    if (hr.hit) {
-      hr.t = rh.ray.tfar;
-      hr.position = org_h(i) + dir_h(i) * hr.t;
-      hr.prim_id = rh.hit.primID;
-      hr.geom_id = rh.hit.geomID;
-      hr.inst_id = 0u;
+        hr.hit = (rh.hit.geomID != RTC_INVALID_GEOMETRY_ID);
+        if (hr.hit) {
+          hr.t = rh.ray.tfar;
+          hr.position = org_h(i) + dir_h(i) * hr.t;
+          hr.prim_id = rh.hit.primID;
+          hr.geom_id = rh.hit.geomID;
+          hr.inst_id = 0u;
 
-      const u32 pid = hr.prim_id;
-      const f32 bu = rh.hit.u;
-      const f32 bv = rh.hit.v;
-      const f32 bw = 1.f - bu - bv;
+          const u32 pid = hr.prim_id;
+          const f32 bu = rh.hit.u;
+          const f32 bv = rh.hit.v;
+          const f32 bw = 1.f - bu - bv;
+          hr.bary = {bu, bv};
 
-      const u32 i0 = m_indices_h(pid * 3 + 0);
-      const u32 i1 = m_indices_h(pid * 3 + 1);
-      const u32 i2 = m_indices_h(pid * 3 + 2);
+          const u32 i0 = indices_h(pid * 3 + 0);
+          const u32 i1 = indices_h(pid * 3 + 1);
+          const u32 i2 = indices_h(pid * 3 + 2);
 
-      const Vec3 p0 = m_positions_h(i0);
-      const Vec3 p1 = m_positions_h(i1);
-      const Vec3 p2 = m_positions_h(i2);
+          const Vec3 p0 = positions_h(i0);
+          const Vec3 p1 = positions_h(i1);
+          const Vec3 p2 = positions_h(i2);
 
-      hr.normal = normalize_safe(cross(p1 - p0, p2 - p0));
+          hr.normal = normalize_safe(cross(p1 - p0, p2 - p0));
 
-      if (m_has_normals) {
-        hr.shading_normal = normalize_safe(
-            m_normals_h(i0) * bw + m_normals_h(i1) * bu + m_normals_h(i2) * bv);
-      } else {
-        hr.shading_normal = hr.normal;
-      }
+          if (has_normals) {
+            hr.shading_normal = normalize_safe(normals_h(i0) * bw + normals_h(i1) * bu + normals_h(i2) * bv);
+            if (dot(hr.shading_normal, hr.normal) < 0.f)
+              hr.shading_normal = hr.shading_normal * -1.f;
+          } else {
+            hr.shading_normal = hr.normal;
+          }
 
-      if (m_has_texcoords) {
-        const Vec2 t0 = m_texcoords_h(i0), t1 = m_texcoords_h(i1), t2 = m_texcoords_h(i2);
-        hr.uv = {t0.x * bw + t1.x * bu + t2.x * bv, t0.y * bw + t1.y * bu + t2.y * bv};
-      } else {
-        hr.uv = {bu, bv};
-      }
+          if (has_texcoords) {
+            const Vec2 t0 = texcoords_h(i0), t1 = texcoords_h(i1), t2 = texcoords_h(i2);
+            hr.uv = {t0.x * bw + t1.x * bu + t2.x * bv, t0.y * bw + t1.y * bu + t2.y * bv};
+          } else {
+            hr.uv = {bu, bv};
+          }
 
-      hr.material_id = m_has_material_ids ? m_material_ids_h(pid) : 0u;
+          hr.material_id = has_material_ids ? material_ids_h(pid) : 0u;
 
-      if (m_has_vertex_colors && m_vertex_colors_h(i0).x >= 0.f) {
-        hr.interpolated_color = m_vertex_colors_h(i0) * bw
-            + m_vertex_colors_h(i1) * bu + m_vertex_colors_h(i2) * bv;
-        hr.has_interpolated_color = true;
-      }
-    }
+          if (has_vertex_colors && vertex_colors_h(i0).x >= 0.f) {
+            hr.interpolated_color =
+                vertex_colors_h(i0) * bw + vertex_colors_h(i1) * bu + vertex_colors_h(i2) * bv;
+            hr.has_interpolated_color = true;
+          }
+        }
 
-    hit_h(i) = hr;
-  }
+        hit_h(i) = hr;
+      });
 
-  Kokkos::deep_copy(hits.hits, hit_h);
+  copy_back(hits.hits, hit_h);
 }
 
 void EmbreeBackend::trace_occluded(const RayBatch &rays, Kokkos::View<u32 *> occluded)
@@ -226,36 +270,46 @@ void EmbreeBackend::trace_occluded(const RayBatch &rays, Kokkos::View<u32 *> occ
   }
 
   const u32 n = rays.count;
-  ensure_buffers(n);
-  Kokkos::deep_copy(m_ray_org_h, rays.origins);
-  Kokkos::deep_copy(m_ray_dir_h, rays.directions);
-  Kokkos::deep_copy(m_ray_tmin_h, rays.tmin);
-  Kokkos::deep_copy(m_ray_tmax_h, rays.tmax);
 
-  const auto &org_h = m_ray_org_h;
-  const auto &dir_h = m_ray_dir_h;
-  const auto &tmin_h = m_ray_tmin_h;
-  const auto &tmax_h = m_ray_tmax_h;
-  auto &occ_h = m_occ_h;
+  const RTCScene scene = m_scene;
+  const auto org_h = host_view_of(rays.origins, m_ray_org_h, true);
+  const auto dir_h = host_view_of(rays.directions, m_ray_dir_h, true);
+  const auto tmin_h = host_view_of(rays.tmin, m_ray_tmin_h, true);
+  const auto tmax_h = host_view_of(rays.tmax, m_ray_tmax_h, true);
+  const auto occ_h = host_view_of(occluded, m_occ_h, false);
 
-  for (u32 i = 0; i < n; ++i) {
-    RTCRay ray{};
-    ray.org_x = org_h(i).x;
-    ray.org_y = org_h(i).y;
-    ray.org_z = org_h(i).z;
-    ray.dir_x = dir_h(i).x;
-    ray.dir_y = dir_h(i).y;
-    ray.dir_z = dir_h(i).z;
-    ray.tnear = tmin_h(i);
-    ray.tfar = tmax_h(i);
-    ray.mask = 0xFFFFFFFFu;
-    ray.flags = 0;
+  const WorkOrder order(n);
+  Kokkos::parallel_for(
+      "embree_trace_occluded",
+      Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace>(0, int(order.range())),
+      [=](const int work_index) {
+        const int i = order.item(work_index);
+        if (i < 0)
+          return;
+        const f32 tnear = tmin_h(i);
+        const f32 tfar = tmax_h(i);
+        if (!(tfar > tnear)) {
+          occ_h(i) = 0u;
+          return;
+        }
 
-    rtcOccluded1(m_scene, &ray, nullptr);
-    occ_h(i) = (ray.tfar < 0.f) ? 1u : 0u;
-  }
+        RTCRay ray{};
+        ray.org_x = org_h(i).x;
+        ray.org_y = org_h(i).y;
+        ray.org_z = org_h(i).z;
+        ray.dir_x = dir_h(i).x;
+        ray.dir_y = dir_h(i).y;
+        ray.dir_z = dir_h(i).z;
+        ray.tnear = tnear;
+        ray.tfar = tfar;
+        ray.mask = 0xFFFFFFFFu;
+        ray.flags = 0;
 
-  Kokkos::deep_copy(occluded, occ_h);
+        rtcOccluded1(scene, &ray, nullptr);
+        occ_h(i) = (ray.tfar < 0.f) ? 1u : 0u;
+      });
+
+  copy_back(occluded, occ_h);
 }
 
 }

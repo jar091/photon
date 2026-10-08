@@ -19,6 +19,12 @@
 
 namespace photon::pt {
 
+bool backend_verbose()
+{
+  static const bool verbose = std::getenv("PHOTON_VERBOSE") != nullptr;
+  return verbose;
+}
+
 std::unique_ptr<RayBackend> create_best_backend()
 {
   const char *env = std::getenv("PHOTON_BACKEND");
@@ -46,7 +52,8 @@ std::unique_ptr<RayBackend> create_best_backend()
     if (cudaGetDeviceCount(&device_count) == cudaSuccess && device_count > 0) {
       try {
         auto backend = std::make_unique<OptixBackend>();
-        std::fprintf(stderr, "[photon] Using OptiX backend (NVIDIA GPU detected)\n");
+        if (backend_verbose())
+          std::fprintf(stderr, "[photon] Using OptiX backend (NVIDIA GPU detected)\n");
         return backend;
       } catch (const std::exception &e) {
         std::fprintf(stderr, "[photon] OptiX init failed (%s), falling back\n", e.what());
@@ -56,16 +63,19 @@ std::unique_ptr<RayBackend> create_best_backend()
 #endif
 
 #ifdef PHOTON_HAS_HIPRT
-  std::fprintf(stderr, "[photon] Using HIP RT backend (AMD GPU detected)\n");
+  if (backend_verbose())
+    std::fprintf(stderr, "[photon] Using HIP RT backend (AMD GPU detected)\n");
   return std::make_unique<HiprtBackend>();
 #endif
 
 #ifdef PHOTON_HAS_EMBREE
-  std::fprintf(stderr, "[photon] Using Embree backend (CPU)\n");
+  if (backend_verbose())
+    std::fprintf(stderr, "[photon] Using Embree backend (CPU)\n");
   return std::make_unique<EmbreeBackend>();
 #endif
 
-  std::fprintf(stderr, "[photon] Using Kokkos fallback backend\n");
+  if (backend_verbose())
+    std::fprintf(stderr, "[photon] Using Kokkos fallback backend\n");
   return std::make_unique<KokkosBackend>();
 }
 

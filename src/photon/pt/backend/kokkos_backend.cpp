@@ -4,6 +4,7 @@
 
 #include "photon/pt/geom/mesh_intersector.h"
 #include "photon/pt/ray.h"
+#include "photon/pt/work_order.h"
 
 namespace photon::pt {
 
@@ -28,8 +29,15 @@ void KokkosBackend::trace_closest(const RayBatch &rays, HitBatch &hits)
   const auto tmins = rays.tmin;
   const auto tmaxs = rays.tmax;
 
+  // The rays are visited in an order that balances the load of host threads.
+  const WorkOrder order(rays.count);
   Kokkos::parallel_for(
-      "trace_closest", rays.count, KOKKOS_LAMBDA(const u32 i) {
+      "trace_closest",
+      Kokkos::RangePolicy<>(0, int(order.range())),
+      KOKKOS_LAMBDA(const int work_index) {
+        const int i = order.item(work_index);
+        if (i < 0)
+          return;
         Ray ray{orgs(i), dirs(i)};
         const MeshHit mh = intersect_mesh_bvh(mesh, bvh, ray, tmins(i), tmaxs(i));
 
@@ -41,6 +49,7 @@ void KokkosBackend::trace_closest(const RayBatch &rays, HitBatch &hits)
           hr.normal = mh.n;
           hr.shading_normal = mh.shading_normal;
           hr.uv = mh.uv;
+          hr.bary = mh.bary;
           hr.prim_id = mh.prim_id;
           hr.geom_id = mh.geom_id;
           hr.material_id = mh.material_id;
@@ -61,10 +70,16 @@ void KokkosBackend::trace_occluded(const RayBatch &rays, Kokkos::View<u32 *> occ
   const auto tmins = rays.tmin;
   const auto tmaxs = rays.tmax;
 
+  const WorkOrder order(rays.count);
   Kokkos::parallel_for(
-      "trace_occluded", rays.count, KOKKOS_LAMBDA(const u32 i) {
+      "trace_occluded",
+      Kokkos::RangePolicy<>(0, int(order.range())),
+      KOKKOS_LAMBDA(const int work_index) {
+        const int i = order.item(work_index);
+        if (i < 0)
+          return;
         Ray ray{orgs(i), dirs(i)};
-        const MeshHit mh = intersect_mesh_bvh(mesh, bvh, ray, tmins(i), tmaxs(i));
+        const MeshHit mh = intersect_mesh_bvh(mesh, bvh, ray, tmins(i), tmaxs(i), true);
         occluded(i) = mh.hit ? 1u : 0u;
       });
   Kokkos::fence();

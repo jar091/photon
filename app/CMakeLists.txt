@@ -10,13 +10,11 @@ add_executable(photon_app main.cpp)
 
 target_link_libraries(photon_app PRIVATE anari_library_photon)
 
-target_include_directories(photon_app PRIVATE "${CMAKE_BINARY_DIR}/_deps/anari-src/src/anari/include")
 
 add_executable(photon_anari_smoke anari_smoke.cpp)
 
-target_link_libraries(photon_anari_smoke PRIVATE anari_library_photon anari)
+target_link_libraries(photon_anari_smoke PRIVATE anari::anari)
 
-target_include_directories(photon_anari_smoke PRIVATE "${CMAKE_BINARY_DIR}/_deps/anari-src/src/anari/include")
 
 add_executable(photon_render photon_render.cpp)
 
@@ -28,15 +26,16 @@ target_link_libraries(photon_debug_ray PRIVATE anari_library_photon)
 
 add_executable(photon_anari_render photon_anari_render.cpp)
 
-target_link_libraries(photon_anari_render PRIVATE anari_library_photon anari)
+target_link_libraries(photon_anari_render PRIVATE anari_library_photon anari::anari)
 
-target_include_directories(photon_anari_render PRIVATE "${CMAKE_BINARY_DIR}/_deps/anari-src/src/anari/include")
 
-add_executable(photon_pbrt_render photon_pbrt_render.cpp)
-target_link_libraries(photon_pbrt_render PRIVATE anari_library_photon)
+if(PHOTON_PBRT_READY)
+  add_executable(photon_pbrt_render photon_pbrt_render.cpp)
+  target_link_libraries(photon_pbrt_render PRIVATE anari_library_photon)
 
-add_executable(photon_bdpt_render photon_bdpt_render.cpp)
-target_link_libraries(photon_bdpt_render PRIVATE anari_library_photon)
+  add_executable(photon_bdpt_render photon_bdpt_render.cpp)
+  target_link_libraries(photon_bdpt_render PRIVATE anari_library_photon)
+endif()
 
 add_executable(photon_volume_render photon_volume_render.cpp)
 
@@ -62,10 +61,5 @@ endif()
 
 add_executable(photon_scene_render photon_scene_render.cpp)
 
-target_link_libraries(photon_scene_render PRIVATE anari_library_photon anari anari_test_scenes helium)
+target_link_libraries(photon_scene_render PRIVATE anari_library_photon anari::anari anari::anari_test_scenes anari::helium)
 
-target_include_directories(photon_scene_render PRIVATE
-  "${CMAKE_BINARY_DIR}/_deps/anari-src/src/anari/include"
-  "${CMAKE_BINARY_DIR}/_deps/anari-src/src"
-  "${CMAKE_BINARY_DIR}/_deps/anari-build/src/anari_test_scenes"
-)

@@ -18,6 +18,7 @@ struct HitResult {
   Vec3 normal;
   Vec3 shading_normal;
   Vec2 uv;
+  Vec2 bary; // barycentrics of the second and third triangle vertex
   Vec3 interpolated_color{0.f, 0.f, 0.f};
   u32 prim_id{0};
   u32 geom_id{0};
@@ -53,5 +54,9 @@ struct RayBackend {
 };
 
 std::unique_ptr<RayBackend> create_best_backend();
+
+// True when the environment variable PHOTON_VERBOSE is set: the back-ends then
+// print progress information to stderr.
+bool backend_verbose();
 
 }

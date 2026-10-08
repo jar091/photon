@@ -23,7 +23,9 @@ KOKKOS_FUNCTION inline TriHit intersect_triangle(const Ray &ray, const Vec3 &v0,
   const Vec3 p = cross(ray.dir, e2);
   const f32 det = dot(e1, p);
 
-  if (Kokkos::fabs(det) < 1e-8f)
+  // Only reject exactly degenerate configurations: an absolute threshold would
+  // drop small triangles.
+  if (Kokkos::fabs(det) < 1e-30f)
     return {};
 
   const f32 inv_det = 1.f / det;

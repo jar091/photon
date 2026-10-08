@@ -51,7 +51,9 @@ else()
   else()
     set(Kokkos_ENABLE_CUDA OFF CACHE BOOL "" FORCE)
     if(MSVC)
+      # No OpenMP backend with MSVC, the C++ threads backend is used instead.
       set(Kokkos_ENABLE_OPENMP OFF CACHE BOOL "" FORCE)
+      set(Kokkos_ENABLE_THREADS ON CACHE BOOL "" FORCE)
     else()
       set(Kokkos_ENABLE_OPENMP ON CACHE BOOL "" FORCE)
     endif()
@@ -65,17 +67,39 @@ else()
   FetchContent_MakeAvailable(kokkos)
 endif()
 
-set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(BUILD_VIEWER OFF CACHE BOOL "" FORCE)
-set(BUILD_TESTING OFF CACHE BOOL "" FORCE) # dependency testing
-set(BUILD_CTS OFF CACHE BOOL "" FORCE)
-set(BUILD_CAT OFF CACHE BOOL "" FORCE)
-set(BUILD_HELIUM_TESTS OFF CACHE BOOL "" FORCE)
+# --------------------------------------------------------------------------
+# ANARI SDK
+# --------------------------------------------------------------------------
+# The ANARI device is built on helium. An installed SDK is preferred
+# (-Danari_DIR=<prefix>/lib/cmake/anari-<version>); when none is found the SDK
+# is fetched and built as a sub-project (PHOTON_FETCH_ANARI).
+# --------------------------------------------------------------------------
+option(PHOTON_FETCH_ANARI "Fetch and build the ANARI SDK when no installed SDK is found" ON)
+set(PHOTON_ANARI_GIT_TAG "next_release" CACHE STRING "ANARI SDK revision fetched by PHOTON_FETCH_ANARI")
 
-# Patch script: replace CMAKE_SOURCE_DIR with PROJECT_SOURCE_DIR in ANARI's
-# CMakeLists.txt files so it works as a FetchContent sub-project.
-# Uses CMake -P for cross-platform compatibility (no Unix find/sed needed).
-file(WRITE "${CMAKE_BINARY_DIR}/_anari_patch.cmake" [=[
+find_package(anari 0.15 QUIET)
+if(anari_FOUND)
+  message(STATUS "Using installed ANARI SDK ${anari_VERSION}: ${anari_DIR}")
+elseif(PHOTON_FETCH_ANARI)
+  message(STATUS "Installed ANARI SDK not found - fetching ${PHOTON_ANARI_GIT_TAG} via FetchContent")
+
+  set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+  set(BUILD_VIEWER OFF CACHE BOOL "" FORCE)
+  set(BUILD_TESTING OFF CACHE BOOL "" FORCE) # dependency testing
+  set(BUILD_CTS OFF CACHE BOOL "" FORCE)
+  set(BUILD_CAT OFF CACHE BOOL "" FORCE)
+  set(BUILD_HELIUM_TESTS OFF CACHE BOOL "" FORCE)
+  set(BUILD_HELIDE_DEVICE ON CACHE BOOL "" FORCE)
+  set(BUILD_DEBUG_DEVICE OFF CACHE BOOL "" FORCE)
+  set(BUILD_SINK_DEVICE OFF CACHE BOOL "" FORCE)
+  set(INSTALL_CODE_GEN_SCRIPTS OFF CACHE BOOL "" FORCE)
+  set(INSTALL_PYTHON_BINDINGS OFF CACHE BOOL "" FORCE)
+  set(ENABLE_RENDER_TESTS OFF CACHE BOOL "" FORCE)
+
+  # Patch script: replace CMAKE_SOURCE_DIR with PROJECT_SOURCE_DIR in ANARI's
+  # CMakeLists.txt files so it works as a FetchContent sub-project.
+  # Uses CMake -P for cross-platform compatibility (no Unix find/sed needed).
+  file(WRITE "${CMAKE_BINARY_DIR}/_anari_patch.cmake" [=[
 file(GLOB_RECURSE _cmake_files "CMakeLists.txt")
 foreach(_f IN LISTS _cmake_files)
   file(READ "${_f}" _content)
@@ -86,30 +110,47 @@ foreach(_f IN LISTS _cmake_files)
 endforeach()
 ]=])
 
-FetchContent_Declare(
-  anari
-  GIT_REPOSITORY https://github.com/KhronosGroup/ANARI-SDK.git
-  GIT_TAG v0.15.0
-  PATCH_COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/_anari_patch.cmake"
-)
+  FetchContent_Declare(
+    anari
+    GIT_REPOSITORY https://github.com/KhronosGroup/ANARI-SDK.git
+    GIT_TAG ${PHOTON_ANARI_GIT_TAG}
+    PATCH_COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/_anari_patch.cmake"
+  )
+  FetchContent_MakeAvailable(anari)
 
-set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(BUILD_TESTING OFF CACHE BOOL "" FORCE) # anari-sdk testing (keep OFF)
-set(BUILD_HELIDE_DEVICE ON CACHE BOOL "" FORCE)
-set(BUILD_DEBUG_DEVICE OFF CACHE BOOL "" FORCE)
-set(BUILD_SINK_DEVICE OFF CACHE BOOL "" FORCE)
-set(BUILD_CTS OFF CACHE BOOL "" FORCE)
-set(BUILD_CAT OFF CACHE BOOL "" FORCE)
-set(INSTALL_CODE_GEN_SCRIPTS OFF CACHE BOOL "" FORCE)
-set(INSTALL_PYTHON_BINDINGS OFF CACHE BOOL "" FORCE)
-set(ENABLE_RENDER_TESTS OFF CACHE BOOL "" FORCE)
+  # Same target names as the installed SDK.
+  foreach(_anari_target anari helium anari_test_scenes)
+    if(TARGET ${_anari_target} AND NOT TARGET anari::${_anari_target})
+      add_library(anari::${_anari_target} ALIAS ${_anari_target})
+    endif()
+  endforeach()
+  if(NOT DEFINED ANARI_CODE_GEN_ROOT)
+    set(ANARI_CODE_GEN_ROOT "${anari_SOURCE_DIR}/code_gen")
+  endif()
+  if(NOT COMMAND anari_generate_queries)
+    include("${anari_SOURCE_DIR}/cmake/anari_generate_codegen.cmake")
+  endif()
+else()
+  message(FATAL_ERROR "ANARI SDK not found. Set anari_DIR or enable PHOTON_FETCH_ANARI.")
+endif()
 
-set(BUILD_TESTING OFF CACHE BOOL "" FORCE) # ensure dependency tests disabled
+if(NOT TARGET anari::helium)
+  message(FATAL_ERROR "ANARI SDK target 'anari::helium' not found")
+endif()
 
-FetchContent_MakeAvailable(anari)
-
-if(NOT TARGET anari)
-  message(FATAL_ERROR "ANARI target not found (expected 'anari')")
+# stb_image is used by the pbrt scene reader. The ANARI SDK sources ship a copy,
+# an installed SDK does not.
+find_path(PHOTON_STB_IMAGE_DIR stb_image.h
+  HINTS "${anari_SOURCE_DIR}/external/stb_image" $ENV{STB_IMAGE_DIR}
+  DOC "Directory with stb_image.h (enables the pbrt scene reader)")
+option(PHOTON_ENABLE_PBRT "Build the pbrt-v4 scene reader (needs stb_image.h)" ON)
+set(PHOTON_PBRT_READY FALSE CACHE INTERNAL "")
+if(PHOTON_ENABLE_PBRT)
+  if(PHOTON_STB_IMAGE_DIR)
+    set(PHOTON_PBRT_READY TRUE CACHE INTERNAL "")
+  else()
+    message(STATUS "stb_image.h not found - pbrt scene reader disabled. Set PHOTON_STB_IMAGE_DIR.")
+  endif()
 endif()
 
 option(PHOTON_ENABLE_EMBREE "Enable Embree ray tracing backend" ON)

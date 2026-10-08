@@ -6,7 +6,9 @@
 #include "photon/pt/light.h"
 #include "photon/pt/material.h"
 #include "photon/pt/math_mat4.h"
+#include "photon/pt/sampler.h"
 #include "photon/pt/texture.h"
+#include "photon/pt/tf_volume.h"
 
 #include <optional>
 #include <vector>
@@ -53,6 +55,20 @@ struct Scene {
   Kokkos::View<f32 *> emissive_prim_areas;
   f32 total_emissive_area{0.f};
   u32 emissive_count{0};
+
+  // Per-vertex attributes and samplers referenced by Material parameter sources.
+  MeshAttributes attributes;
+  SamplerTable samplers;
+
+  // Transfer function volumes.
+  VolumeSet volumes;
+
+  // False hides the environment map from camera rays (it still lights the scene).
+  bool env_visible{true};
+
+  // Offset of secondary ray origins from the surface. 0 derives it from the
+  // bounds of `bvh` (or uses a default when the scene has no BVH).
+  f32 ray_epsilon{0.f};
 };
 
 } // namespace photon::pt

@@ -98,8 +98,10 @@ struct EnvironmentMap {
     const f32 col_cdf1 = conditional_cdf(row, col + 1);
     const f32 col_pdf = col_cdf1 - col_cdf0;
 
-    const f32 u = ((f32)col + 0.5f) / (f32)width;
-    const f32 v = ((f32)row + 0.5f) / (f32)height;
+    // Uniform position inside the selected pixel; the density is constant per
+    // pixel in (u, v) and converted to solid angle below.
+    const f32 u = ((f32)col + rng.next_f32()) / (f32)width;
+    const f32 v = ((f32)row + rng.next_f32()) / (f32)height;
 
     const Vec2 uv{u, v};
     const Vec3 dir = to_world_space(uv_to_dir(uv));
@@ -107,7 +109,7 @@ struct EnvironmentMap {
     const f32 theta = v * PI;
     const f32 sin_theta = Kokkos::sin(theta);
     const f32 denom = TWO_PI * PI * Kokkos::fmax(sin_theta, 1e-6f);
-    pdf_out = (row_pdf * col_pdf) / denom;
+    pdf_out = (row_pdf * col_pdf) * (f32)width * (f32)height / denom;
 
     return dir;
   }
@@ -127,10 +129,10 @@ struct EnvironmentMap {
     const f32 row_pdf = marginal_cdf(y + 1) - marginal_cdf(y);
     const f32 col_pdf = conditional_cdf(y, x + 1) - conditional_cdf(y, x);
 
-    const f32 theta = ((f32)y + 0.5f) * (PI / (f32)height);
+    const f32 theta = uv.y * PI;
     const f32 sin_theta = Kokkos::sin(theta);
     const f32 denom = TWO_PI * PI * Kokkos::fmax(sin_theta, 1e-6f);
-    return (row_pdf * col_pdf) / denom;
+    return (row_pdf * col_pdf) * (f32)width * (f32)height / denom;
   }
 
   KOKKOS_FUNCTION static Vec2 dir_to_uv(const Vec3 &d)

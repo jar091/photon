@@ -133,13 +133,57 @@ Options:
 
 ## ANARI Device
 
-Photon also works as an ANARI device for integration with ANARI-compatible applications:
+Photon also works as an ANARI device (library `photon`, `anari_library_photon`) for
+integration with ANARI-compatible applications. The device is built on the helium layer of
+the ANARI SDK and was tested with ANARI SDK 0.17, pynari and the ANARI render engine of
+Blender.
+
+- Frame: `channel.color` (`FLOAT32_VEC4`, `UFIXED8_VEC4`, `UFIXED8_RGBA_SRGB`),
+  `channel.depth`, `channel.normal`, `channel.albedo`; `ANARI_KHR_FRAME_ACCUMULATION`
+- Renderer `default`: `background`, `ambientRadiance`, `ambientColor`, `pixelSamples`,
+  `maxRayDepth`, `throughputClamp`, `adaptiveSampling`
+- Cameras: `perspective` (with depth of field), `orthographic`
+- Geometry: `triangle`, `quad`, `sphere`, `cylinder`, `cone`, `curve`, `isosurface`
+  (everything except triangles is tessellated)
+- Materials: `matte`, `physicallyBased`; samplers `image1D`, `image2D`, `image3D`, `transform`
+- Lights: `directional`, `point`, `spot`, `quad`, `hdri`
+- Volumes: `structuredRegular` fields with `transferFunction1D`
+- Instances are flattened into one mesh
+
+Environment variables: `PHOTON_BACKEND=optix|embree|kokkos` selects the ray tracing
+backend, `PHOTON_NUM_THREADS` the number of CPU threads, `PHOTON_VERBOSE=1` prints the
+selected backend.
 
 ```bash
-# Render ANARI test scenes
+# Render ANARI test scenes (the apps are not built on Windows)
 ./build/app/photon_scene_render --device photon --scene test/instanced_cubes \
   --width 512 --height 512 --spp 64 --output render.ppm
 ```
+
+### Windows
+
+Photon builds with MSVC and Ninja from a Visual Studio developer prompt, against an
+installed Kokkos (5.2.2 was used) and an installed ANARI SDK:
+
+```bat
+rem GPU: Kokkos with Kokkos_ENABLE_CUDA and Kokkos_ENABLE_COMPILE_AS_CMAKE_LANGUAGE
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release ^
+  -DKokkos_DIR=path/to/kokkos-cuda/lib/cmake/Kokkos -Danari_DIR=path/to/anari/lib/cmake/anari-0.17.0 ^
+  -DPHOTON_ENABLE_OPTIX=ON -DOptiX_INSTALL_DIR=path/to/optix ^
+  -DPHOTON_ENABLE_EMBREE=OFF -DPHOTON_ENABLE_OIDN=OFF ^
+  -DPHOTON_STB_IMAGE_DIR=path/to/stb_image -DCMAKE_INSTALL_PREFIX=path/to/install
+
+rem CPU: Kokkos with Kokkos_ENABLE_THREADS (Kokkos' OpenMP backend does not work with MSVC)
+cmake -S . -B build-cpu -G Ninja -DCMAKE_BUILD_TYPE=Release -DOPENCODE_ENABLE_CUDA=OFF ^
+  -DKokkos_DIR=path/to/kokkos-host/lib/cmake/Kokkos -Danari_DIR=path/to/anari/lib/cmake/anari-0.17.0 ^
+  -DPHOTON_ENABLE_EMBREE=ON -Dembree_DIR=path/to/embree/lib/cmake/embree-4.4.1 ^
+  -DPHOTON_ENABLE_OIDN=OFF -DPHOTON_STB_IMAGE_DIR=path/to/stb_image ^
+  -DPHOTON_RUNTIME_DLLS=path/to/embree4.dll;path/to/tbb12.dll -DCMAKE_INSTALL_PREFIX=path/to/install-cpu
+```
+
+`cmake --build` and `cmake --install` then put `anari_library_photon.dll` (and the DLLs
+listed in `PHOTON_RUNTIME_DLLS`) into `bin`. `PHOTON_STB_IMAGE_DIR` is only needed for
+the pbrt reader. Tests and apps are not built on Windows.
 
 ## Architecture
 
@@ -189,12 +233,12 @@ The renderer also supports the [Disney Moana Island Scene](https://www.disneyani
 | Dependency | Version | Method | Required |
 |-----------|---------|--------|----------|
 | Kokkos | 5.0+ | find_package / FetchContent | Yes |
-| ANARI SDK | 0.15.0 | FetchContent | Yes |
+| ANARI SDK | 0.17 | find_package (`anari_DIR`) / FetchContent | Yes |
 | Embree | 4.x | find_package | Optional |
 | OptiX | 8.x | find_package | Optional |
 | HIP RT | ROCm 5.x+ | find_package | Optional |
 | Intel OIDN | 2.x | find_package | Optional |
-| stb_image | (bundled) | via ANARI SDK | Yes |
+| stb_image | (bundled) | via ANARI SDK sources (`PHOTON_STB_IMAGE_DIR`) | pbrt reader only |
 
 ## License
 

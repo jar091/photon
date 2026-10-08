@@ -170,7 +170,7 @@ void generate_isosurface(
         // Triangulation table (simplified — use a basic triangulation)
         // For each face of the cube, if the isosurface crosses it, emit a triangle
         static const int tri_table[256][16] = {
-          #include "mc_table.inc"
+          #include "photon/pt/geom/mc_table.inc"
         };
 
         for (int t = 0; tri_table[cube_index][t] != -1; t += 3) {

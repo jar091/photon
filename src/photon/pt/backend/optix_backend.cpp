@@ -88,7 +88,8 @@ struct EmptyData {};
 
 static void optix_log_callback(unsigned int level, const char *tag, const char *message, void *)
 {
-  if (level >= 4)
+  // Levels: 1 fatal, 2 error, 3 warning, 4 print.
+  if (level <= 2 || backend_verbose())
     std::fprintf(stderr, "[photon][optix][%s] %s\n", tag ? tag : "", message ? message : "");
 }
 
@@ -139,7 +140,7 @@ OptixBackend::OptixBackend()
   CUcontext cu_ctx = 0;
   OptixDeviceContextOptions options{};
   options.logCallbackFunction = optix_log_callback;
-  options.logCallbackLevel = 4;
+  options.logCallbackLevel = backend_verbose() ? 4 : 2;
   check_optix(optixInit(), "optixInit");
   check_optix(optixDeviceContextCreate(cu_ctx, &options, &m_context), "optixDeviceContextCreate");
 }
@@ -364,7 +365,8 @@ void OptixBackend::build_accel(const Scene &scene)
   cudaFree(reinterpret_cast<void *>(d_vertices));
   cudaFree(reinterpret_cast<void *>(d_indices));
 
-  std::fprintf(stderr, "[photon] OptiX GAS built: %zu tris, %.1f KB\n",
+  if (backend_verbose())
+    std::fprintf(stderr, "[photon] OptiX GAS built: %zu tris, %.1f KB\n",
       tri_count, float(compacted_size > 0 ? compacted_size : buffer_sizes.outputSizeInBytes) / 1024.f);
 
   create_pipeline();
@@ -451,7 +453,8 @@ OptixTraversableHandle OptixBackend::build_gas_for_mesh(const TriangleMesh &mesh
 
   size_t free_mem = 0, total_mem = 0;
   cudaMemGetInfo(&free_mem, &total_mem);
-  std::fprintf(stderr, "[photon] GAS built: %u tris, %.1f MB output | GPU free: %.0f MB / %.0f MB\n",
+  if (backend_verbose())
+    std::fprintf(stderr, "[photon] GAS built: %u tris, %.1f MB output | GPU free: %.0f MB / %.0f MB\n",
       out.tri_count, double(bs.outputSizeInBytes)/(1<<20),
       double(free_mem)/(1<<20), double(total_mem)/(1<<20));
 
@@ -533,7 +536,8 @@ void OptixBackend::build_ias(const std::vector<ObjectGAS> &gas_list,
   for (u32 oi = 0; oi < n_obj; ++oi) {
     if (per_obj_instances[oi].empty()) continue;
 
-    std::fprintf(stderr, "[photon] Building child IAS %u/%u: %zu instances\n",
+    if (backend_verbose())
+      std::fprintf(stderr, "[photon] Building child IAS %u/%u: %zu instances\n",
         oi+1, n_obj, per_obj_instances[oi].size());
 
     OptixTraversableHandle child_handle =
@@ -579,7 +583,8 @@ void OptixBackend::build_ias(const std::vector<ObjectGAS> &gas_list,
 
   if (top_level_instances.empty()) return;
 
-  std::fprintf(stderr, "[photon] Building top-level IAS: %zu child IAS\n",
+  if (backend_verbose())
+    std::fprintf(stderr, "[photon] Building top-level IAS: %zu child IAS\n",
       top_level_instances.size());
 
   m_ias_handle = build_single_ias(m_context, top_level_instances, m_ias_buffer);
@@ -646,7 +651,8 @@ void OptixBackend::build_ias(const std::vector<ObjectGAS> &gas_list,
   m_sbt.hitgroupRecordCount          = total_entries;
   optixProgramGroupDestroy(hit_pg);
 
-  std::fprintf(stderr, "[photon] OptiX two-level IAS: %zu objects, %zu total instances\n",
+  if (backend_verbose())
+    std::fprintf(stderr, "[photon] OptiX two-level IAS: %zu objects, %zu total instances\n",
       top_level_instances.size(), instances.size());
 }
 
@@ -710,7 +716,8 @@ void OptixBackend::build_accel_instanced(const Scene &scene,
   }
 
   build_ias(m_object_gas, instanced.instances, has_scene_mesh ? &scene_gas : nullptr);
-  std::fprintf(stderr, "[photon] OptiX IAS: %u objects, %zu instances\n",
+  if (backend_verbose())
+    std::fprintf(stderr, "[photon] OptiX IAS: %u objects, %zu instances\n",
       n_objects, instanced.instances.size());
 }
 

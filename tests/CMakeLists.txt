@@ -37,9 +37,8 @@ target_link_libraries(photon_camera_test PRIVATE anari_library_photon)
 target_link_libraries(photon_pathtracer_test PRIVATE anari_library_photon)
 target_link_libraries(photon_integration_test PRIVATE anari_library_photon)
 target_link_libraries(photon_volume_test PRIVATE anari_library_photon)
-target_link_libraries(photon_anari_import_test PRIVATE anari_library_photon anari)
+target_link_libraries(photon_anari_import_test PRIVATE anari::anari)
 
-target_include_directories(photon_anari_import_test PRIVATE "${CMAKE_BINARY_DIR}/_deps/anari-src/src/anari/include")
 
 add_test(NAME photon_version_test COMMAND $<TARGET_FILE:photon_version_test>)
 add_test(NAME photon_pt_smoke_test COMMAND $<TARGET_FILE:photon_pt_smoke_test>)

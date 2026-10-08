@@ -20,6 +20,7 @@ struct HitResultGPU {
   float3 normal;
   float3 shading_normal;
   float2 uv;
+  float2 bary;
   float3 interpolated_color;
   unsigned int prim_id;
   unsigned int geom_id;
@@ -78,6 +79,7 @@ __device__ void shade_hit(unsigned int pid,float bu,float bv,
   float3 ng=normalize3(cross3(e1,e2));
   hr.position={ro.x+rd.x*t,ro.y+rd.y*t,ro.z+rd.z*t};
   hr.normal={ng.x,ng.y,ng.z};hr.prim_id=pid;hr.geom_id=0;hr.t=t;
+  hr.bary={bu,bv};
   if(hn){float3 n0=nrm[i0],n1=nrm[i1],n2=nrm[i2];
     float3 sn=normalize3(make_float3(n0.x*bw+n1.x*bu+n2.x*bv,n0.y*bw+n1.y*bu+n2.y*bv,n0.z*bw+n1.z*bu+n2.z*bv));
     if(dot3(sn,ng)<0.f){sn.x=-sn.x;sn.y=-sn.y;sn.z=-sn.z;}
@@ -113,7 +115,7 @@ extern "C" __global__ void __raygen__rg()
     if(!p0){
       HitResultGPU hr{};
       hr.hit=false;hr.t=0.f;hr.prim_id=0;hr.material_id=0;
-      hr.uv={0.f,0.f};
+      hr.uv={0.f,0.f};hr.bary={0.f,0.f};
       hr.position=hr.normal=hr.shading_normal=hr.interpolated_color={0.f,0.f,0.f};
       hr.has_interpolated_color=false;
       ((HitResultGPU*)params.hit_results)[idx]=hr;
@@ -133,7 +135,7 @@ extern "C" __global__ void __raygen__rg()
         params.has_normals,params.has_texcoords,params.has_material_ids,params.has_vertex_colors,hr);
   } else {
     hr.t=0.f;hr.prim_id=0;hr.material_id=0;
-    hr.uv={0.f,0.f};hr.position=hr.normal=hr.shading_normal=hr.interpolated_color={0.f,0.f,0.f};
+    hr.uv={0.f,0.f};hr.bary={0.f,0.f};hr.position=hr.normal=hr.shading_normal=hr.interpolated_color={0.f,0.f,0.f};
     hr.has_interpolated_color=false;
   }
   ((HitResultGPU*)params.hit_results)[idx]=hr;
