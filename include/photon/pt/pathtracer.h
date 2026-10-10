@@ -35,6 +35,19 @@ struct RenderParams {
   bool adaptive_sampling{true};
   // Upper limit of the path throughput (firefly suppression), <= 0 disables it.
   f32 throughput_clamp{10.f};
+  // Limits of the number of bounces of one kind, counted as in Cycles: the
+  // bounces after the camera hit; < 0: no limit. As with max_depth, the bounce
+  // which exceeds a limit is still traced, it only collects emission and
+  // environment light.
+  int max_diffuse_bounces{-1};
+  int max_glossy_bounces{-1};
+  int max_transmission_bounces{-1};
+  int max_volume_bounces{-1};
+  // Limits of R+G+B of one light contribution to a path, for light which
+  // arrives at the camera hit (and emission the camera sees itself) and for
+  // light which arrives at later hits; <= 0: no clamp.
+  f32 clamp_direct_sum{0.f};
+  f32 clamp_indirect_sum{0.f};
   // Row 0 of the result is the bottom row of the image when true.
   bool bottom_up{false};
   // Part of the image plane which is rendered: left, bottom, right, top.
@@ -116,6 +129,9 @@ private:
   Kokkos::View<u32 *> m_path_depth; // number of scattering events so far
   Kokkos::View<u32 *> m_primary;    // 1 until the first scattering event
   Kokkos::View<f32 *> m_path_dist;  // distance travelled by the camera ray
+  // bounces by kind (8 bits each: diffuse, glossy, transmission; 7 bits volume),
+  // bit 31: a bounce limit is exceeded, the path only collects emission
+  Kokkos::View<u32 *> m_path_kinds;
 
   // Shadow ray views
   Kokkos::View<Vec3 *> m_shadow_origins;

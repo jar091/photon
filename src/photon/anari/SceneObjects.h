@@ -102,6 +102,7 @@ struct Material : public Object
   MaterialParameter m_roughness;
   MaterialParameter m_emissive;
   MaterialParameter m_transmission;
+  MaterialParameter m_normal; // only its sampler or attribute is used
   float m_ior{1.5f};
   float m_specular{0.f};
   float m_clearcoat{0.f};

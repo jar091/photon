@@ -68,6 +68,10 @@ struct Material {
   ParamSource roughness_src{};
   ParamSource emission_src{};
   ParamSource transmission_src{};
+  // Tangent-space normal map (attribute or sampler): the value c in [0,1]
+  // encodes the normal 2c - 1 in the frame of the texture coordinates
+  // (tangent along +U, bitangent along +V, the shading normal).
+  ParamSource normal_src{};
   AlphaMode alpha_mode{AlphaMode::Blend};
   f32 alpha_cutoff{0.5f};
   i32 flags{0};

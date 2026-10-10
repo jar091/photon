@@ -345,6 +345,7 @@ Material convert_material(const MaterialData &in)
   m.roughness_src = convert_source(in.roughness_src);
   m.emission_src = convert_source(in.emission_src);
   m.transmission_src = convert_source(in.transmission_src);
+  m.normal_src = convert_source(in.normal_src);
   m.roughness_src_squared = 1;
   m.base_color_alpha = in.base_color_alpha ? 1 : 0;
 
@@ -886,6 +887,8 @@ void Renderer::Impl::render(const CameraData &camera, const RenderSettings &sett
     cam = Camera::make_perspective(position, position + direction, up, fovy_degrees, aspect,
         lens ? 2.f * camera.aperture_radius : 0.f, lens ? camera.focus_distance : 1.f);
   }
+  cam.clip_near = camera.clip_near > 0.f ? camera.clip_near : 0.f;
+  cam.clip_far = camera.clip_far < 1e30f ? camera.clip_far : 1e30f;
 
   RenderParams &params = pathtracer.params;
   params.width = w;
@@ -900,6 +903,13 @@ void Renderer::Impl::render(const CameraData &camera, const RenderSettings &sett
   params.ambient_radiance = settings.ambient_radiance;
   params.adaptive_sampling = settings.adaptive_sampling;
   params.throughput_clamp = settings.throughput_clamp;
+  params.max_diffuse_bounces = settings.max_diffuse_bounces;
+  params.max_glossy_bounces = settings.max_glossy_bounces;
+  params.max_transmission_bounces = settings.max_transmission_bounces;
+  params.max_volume_bounces = settings.max_volume_bounces;
+  // as in Cycles the value limits the mean of the channels
+  params.clamp_direct_sum = 3.f * std::max(settings.clamp_direct, 0.f);
+  params.clamp_indirect_sum = 3.f * std::max(settings.clamp_indirect, 0.f);
   params.bottom_up = true;
   for (int i = 0; i < 4; ++i)
     params.image_region[i] = camera.image_region[i];

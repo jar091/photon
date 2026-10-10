@@ -33,6 +33,32 @@ KOKKOS_FUNCTION inline Rng make_rng(u32 pixel, u32 sample, u32 dimension)
   return Rng(hash_u32(pixel + hash_u32(sample + hash_u32(dimension + 0x9e3779b9U))));
 }
 
+// Clamp of one light contribution to a path, as Cycles does it: the sum R+G+B
+// is limited and the color keeps its hue. `light_bounce` is the number of
+// bounces before the hit which receives the light: 0 (and the -1 of emission
+// which the camera sees itself) is direct light, the rest indirect.
+KOKKOS_FUNCTION inline Vec3 clamp_contribution(const Vec3 &c, int light_bounce, f32 direct_sum, f32 indirect_sum)
+{
+  const f32 limit = light_bounce > 0 ? indirect_sum : direct_sum;
+  if (!(limit > 0.f))
+    return c;
+  const f32 sum = Kokkos::fabs(c.x) + Kokkos::fabs(c.y) + Kokkos::fabs(c.z);
+  return sum > limit ? c * (limit / sum) : c;
+}
+
+// Counts a bounce of one kind in the packed counters of a path (8 bits at
+// `shift`) and tells whether it exceeds `limit` (< 0: no limit).
+KOKKOS_FUNCTION inline bool count_bounce(u32 &kinds, u32 shift, int limit)
+{
+  u32 count = (kinds >> shift) & 0x7fu;
+  if (count < 0x7fu)
+    ++count;
+  kinds = (kinds & ~(0x7fu << shift)) | (count << shift);
+  return limit >= 0 && int(count) > limit;
+}
+
+const u32 PATH_EMISSION_ONLY = 0x80000000u;
+
 KOKKOS_FUNCTION inline f32 luminance_of(const Vec3 &c)
 {
   return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
@@ -106,6 +132,50 @@ KOKKOS_FUNCTION inline Vec4 eval_source(const ShadeScene &sc, const ParamSource 
     return {0.f, 0.f, 0.f, 1.f};
   const i32 slot = sc.samplers.infos(u32(src.index)).in_attribute;
   return sc.samplers.sample(src.index, fetch_attribute(sc, slot, q));
+}
+
+// Shading normal of a normal map. The tangent frame comes from the texture
+// coordinates the map is looked up with: dP/du and dP/dv of the triangle,
+// orthogonalized against the shading normal `sn` (which stays the normal of
+// degenerate coordinates).
+KOKKOS_FUNCTION inline Vec3 apply_normal_map(const ShadeScene &sc, const ParamSource &src, const SurfaceQuery &q,
+    const Vec3 &sn)
+{
+  const Vec4 c = eval_source(sc, src, q);
+  const Vec3 nm{2.f * c.x - 1.f, 2.f * c.y - 1.f, 2.f * c.z - 1.f};
+
+  // texture coordinates at the corners of the triangle
+  i32 slot = src.index;
+  if (src.kind != ParamSourceKind::Attribute) {
+    if (src.index < 0 || u32(src.index) >= sc.samplers.count)
+      return sn;
+    slot = sc.samplers.infos(u32(src.index)).in_attribute;
+  }
+  SurfaceQuery corner = q;
+  corner.b1 = 0.f;
+  corner.b2 = 0.f;
+  const Vec4 a0 = fetch_attribute(sc, slot, corner);
+  corner.b1 = 1.f;
+  const Vec4 a1 = fetch_attribute(sc, slot, corner);
+  corner.b1 = 0.f;
+  corner.b2 = 1.f;
+  const Vec4 a2 = fetch_attribute(sc, slot, corner);
+  const f32 du1 = a1.x - a0.x, dv1 = a1.y - a0.y, du2 = a2.x - a0.x, dv2 = a2.y - a0.y;
+  const f32 det = du1 * dv2 - du2 * dv1;
+  if (!(Kokkos::fabs(det) > 1e-20f))
+    return sn;
+
+  const Vec3 p0 = sc.positions(sc.indices(q.prim * 3 + 0));
+  const Vec3 e1 = sc.positions(sc.indices(q.prim * 3 + 1)) - p0;
+  const Vec3 e2 = sc.positions(sc.indices(q.prim * 3 + 2)) - p0;
+  Vec3 t = (e1 * dv2 - e2 * dv1) * (1.f / det);
+  Vec3 b = (e2 * du1 - e1 * du2) * (1.f / det);
+  t = t - sn * dot(sn, t);
+  b = b - sn * dot(sn, b);
+  if (!(dot(t, t) > 0.f) || !(dot(b, b) > 0.f))
+    return sn;
+  const Vec3 n = normalize(t) * nm.x + normalize(b) * nm.y + sn * nm.z;
+  return dot(n, n) > 0.f ? normalize(n) : sn;
 }
 
 KOKKOS_FUNCTION inline f32 clamp01f(f32 x)
@@ -476,6 +546,7 @@ void PathTracer::ensure_views(u32 pixel_count, u32 w, u32 h)
   m_path_depth = Kokkos::View<u32 *>("pt_path_depth", pixel_count);
   m_primary = Kokkos::View<u32 *>("pt_primary", pixel_count);
   m_path_dist = Kokkos::View<f32 *>("pt_path_dist", pixel_count);
+  m_path_kinds = Kokkos::View<u32 *>("pt_path_kinds", pixel_count);
 
   // Shadow rays
   m_shadow_origins = Kokkos::View<Vec3 *>("pt_shadow_o", pixel_count);
@@ -504,6 +575,12 @@ RenderResult PathTracer::render()
   const Vec3 ambient = params.ambient_color * params.ambient_radiance;
   const bool adaptive = params.adaptive_sampling;
   const f32 throughput_clamp = params.throughput_clamp;
+  const int max_diffuse_bounces = params.max_diffuse_bounces;
+  const int max_glossy_bounces = params.max_glossy_bounces;
+  const int max_transmission_bounces = params.max_transmission_bounces;
+  const int max_volume_bounces = params.max_volume_bounces;
+  const f32 clamp_direct = params.clamp_direct_sum;
+  const f32 clamp_indirect = params.clamp_indirect_sum;
   const bool bottom_up = params.bottom_up;
   const f32 region_x0 = params.image_region[0];
   const f32 region_y0 = params.image_region[1];
@@ -582,6 +659,7 @@ RenderResult PathTracer::render()
   auto &path_depth = m_path_depth;
   auto &primary = m_primary;
   auto &path_dist = m_path_dist;
+  auto &path_kinds = m_path_kinds;
 
   RayBatch shadow_rays;
   shadow_rays.origins = m_shadow_origins;
@@ -657,8 +735,12 @@ RenderResult PathTracer::render()
           const Ray r = cam.ray(u, v, rng);
           rays.origins(idx) = r.org;
           rays.directions(idx) = r.dir;
-          rays.tmin(idx) = 0.f;
-          rays.tmax(idx) = 1e30f;
+          // The camera ray runs from the near to the far clip plane of the
+          // camera; hit distances stay relative to its origin.
+          f32 t_near, t_far;
+          cam.clip_range(r.dir, t_near, t_far);
+          rays.tmin(idx) = t_near;
+          rays.tmax(idx) = t_far;
 
           throughput(idx) = Vec3{1.f, 1.f, 1.f};
           active(idx) = 1u;
@@ -666,6 +748,7 @@ RenderResult PathTracer::render()
           path_depth(idx) = 0u;
           primary(idx) = 1u;
           path_dist(idx) = 0.f;
+          path_kinds(idx) = 0u;
           sample_start(idx) = accum(idx);
           pixel_samples(idx) = pixel_samples(idx) + 1u;
 
@@ -698,13 +781,17 @@ RenderResult PathTracer::render()
             const Vec3 ray_org = rays.origins(idx);
             const Vec3 ray_dir = rays.directions(idx);
             const u32 depth = path_depth(idx);
+            // A bounce limit was exceeded: the path only collects emission.
+            const bool emission_only = (path_kinds(idx) & PATH_EMISSION_ONLY) != 0u;
 
             Rng rng = make_rng(u32(idx), sample_index, 1u + iteration);
 
             // Scattering inside a volume in front of the surface hit.
             if (has_volumes) {
               Vec3 albedo{0.f, 0.f, 0.f};
-              const f32 t_end = hr.hit ? hr.t : 1e30f;
+              // without a hit the ray ends at its tmax (1e30, or the far clip
+              // plane of the camera for a camera ray)
+              const f32 t_end = hr.hit ? hr.t : rays.tmax(idx);
               const f32 t_scatter =
                   sc.volumes.sample_scatter(Ray{ray_org, ray_dir}, rays.tmin(idx), t_end, rng, albedo);
               if (t_scatter >= 0.f) {
@@ -721,7 +808,7 @@ RenderResult PathTracer::render()
                   }
                 }
 
-                if (depth >= max_depth) {
+                if (depth >= max_depth || emission_only) {
                   active(idx) = 0u;
                   return;
                 }
@@ -732,7 +819,8 @@ RenderResult PathTracer::render()
                 const DirectSample ds = sample_direct(sc, p, rng);
                 if (ds.valid) {
                   const f32 w_mis = ds.mis ? power_heuristic(1, ds.pdf, 1, phase) : 1.f;
-                  nee_contrib(idx) = tp * ds.radiance * (phase * w_mis / ds.pdf);
+                  nee_contrib(idx) = clamp_contribution(
+                      tp * ds.radiance * (phase * w_mis / ds.pdf), int(depth), clamp_direct, clamp_indirect);
                   nee_active(idx) = 1u;
                   shadow_rays.origins(idx) = p;
                   shadow_rays.directions(idx) = ds.wi;
@@ -755,6 +843,12 @@ RenderResult PathTracer::render()
                 throughput(idx) = tp_next;
                 prev_pdf(idx) = phase;
                 path_depth(idx) = depth + 1u;
+                {
+                  u32 kinds = path_kinds(idx);
+                  if (count_bounce(kinds, 24u, max_volume_bounces))
+                    kinds |= PATH_EMISSION_ONLY;
+                  path_kinds(idx) = kinds;
+                }
                 rays.origins(idx) = p;
                 rays.directions(idx) = sample_uniform_sphere(rng);
                 rays.tmin(idx) = 0.f;
@@ -794,7 +888,12 @@ RenderResult PathTracer::render()
                 }
               }
 
-              accum(idx) = accum(idx) + throughput(idx) * L;
+              // The background color or image behind the scene is no light; the
+              // environment is, also when the camera sees it (direct clamp).
+              Vec3 from_miss = throughput(idx) * L;
+              if (primary(idx) == 0u || (sc.has_env && sc.env_visible))
+                from_miss = clamp_contribution(from_miss, int(depth) - 1, clamp_direct, clamp_indirect);
+              accum(idx) = accum(idx) + from_miss;
               active(idx) = 0u;
               return;
             }
@@ -832,6 +931,19 @@ RenderResult PathTracer::render()
               rays.tmin(idx) = eps;
               rays.tmax(idx) = 1e30f;
               path_dist(idx) = path_dist(idx) + hr.t;
+              if (primary(idx) != 0u) {
+                // still the camera ray: it keeps ending on the far clip plane
+                f32 t_near, t_far;
+                cam.clip_range(ray_dir, t_near, t_far);
+                if (t_far < 1e30f) {
+                  rays.tmax(idx) = t_far - path_dist(idx);
+                  if (rays.tmax(idx) < eps) {
+                    // nothing left: an empty ray, which misses everything
+                    rays.tmin(idx) = 1.f;
+                    rays.tmax(idx) = 0.f;
+                  }
+                }
+              }
               // Shadow rays stop at transparent surfaces, so lights behind them
               // are only found by this ray.
               prev_pdf(idx) = -1.f;
@@ -856,6 +968,9 @@ RenderResult PathTracer::render()
               sn = normalize(tangent * nm.x + bitangent * nm.y + sn * nm.z);
             }
 
+            if (mat.normal_src.kind != ParamSourceKind::Constant)
+              sn = apply_normal_map(sc, mat.normal_src, q, sn);
+
             if (primary(idx) != 0u) {
               primary(idx) = 0u;
               accum_alpha(idx) = accum_alpha(idx) + 1.f;
@@ -878,10 +993,12 @@ RenderResult PathTracer::render()
                   w_mis = power_heuristic(1, bsdf_pdf, 1, light_pdf);
                 }
               }
-              accum(idx) = accum(idx) + throughput(idx) * material_emission(mat) * w_mis;
+              accum(idx) = accum(idx)
+                  + clamp_contribution(throughput(idx) * material_emission(mat) * w_mis, int(depth) - 1, clamp_direct,
+                      clamp_indirect);
             }
 
-            if ((mat.flags & MATERIAL_FLAG_EMITTER_ONLY) != 0 || depth >= max_depth) {
+            if ((mat.flags & MATERIAL_FLAG_EMITTER_ONLY) != 0 || depth >= max_depth || emission_only) {
               active(idx) = 0u;
               return;
             }
@@ -895,7 +1012,8 @@ RenderResult PathTracer::render()
                   f32 w_mis = 1.f;
                   if (ds.mis)
                     w_mis = power_heuristic(1, ds.pdf, 1, disney_bsdf_pdf(mat, wo, ds.wi, n, sn));
-                  nee_contrib(idx) = throughput(idx) * f * ds.radiance * (w_mis / ds.pdf);
+                  nee_contrib(idx) = clamp_contribution(
+                      throughput(idx) * f * ds.radiance * (w_mis / ds.pdf), int(depth), clamp_direct, clamp_indirect);
                   nee_active(idx) = 1u;
 
                   // The shadow ray starts above the surface and ends just before
@@ -952,6 +1070,19 @@ RenderResult PathTracer::render()
             const Vec3 wi = normalize(bs.wi);
             // Start on the side of the surface the new direction leaves from.
             const f32 side = dot(wi, hr.normal) < 0.f ? -1.f : 1.f;
+
+            // Count the bounce by its kind: through the surface, off the diffuse
+            // lobe, or off a glossy or specular one.
+            {
+              u32 kinds = path_kinds(idx);
+              const bool through = (dot(wi, hr.normal) < 0.f) != (dot(wo, hr.normal) < 0.f);
+              const bool exceeded = through ? count_bounce(kinds, 16u, max_transmission_bounces)
+                  : (bs.is_diffuse ? count_bounce(kinds, 0u, max_diffuse_bounces)
+                                   : count_bounce(kinds, 8u, max_glossy_bounces));
+              if (exceeded)
+                kinds |= PATH_EMISSION_ONLY;
+              path_kinds(idx) = kinds;
+            }
             rays.origins(idx) = p + hr.normal * (side * eps);
             rays.directions(idx) = wi;
             rays.tmin(idx) = 0.f;

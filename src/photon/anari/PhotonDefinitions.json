@@ -80,6 +80,69 @@
           "tags": [],
           "default": false,
           "description": "stop sampling converged pixels within one anariRenderFrame() (biased)"
+        },
+        {
+          "name": "maxBounce",
+          "types": [
+            "ANARI_INT32"
+          ],
+          "tags": [],
+          "minimum": 0,
+          "description": "maximum number of bounces after the camera hit (0: direct light only), counted as in Cycles; replaces maxRayDepth when set"
+        },
+        {
+          "name": "maxDiffuseBounce",
+          "types": [
+            "ANARI_INT32"
+          ],
+          "tags": [],
+          "minimum": 0,
+          "description": "maximum number of diffuse bounces of a path; unset: no limit"
+        },
+        {
+          "name": "maxGlossyBounce",
+          "types": [
+            "ANARI_INT32"
+          ],
+          "tags": [],
+          "minimum": 0,
+          "description": "maximum number of glossy and specular reflection bounces of a path; unset: no limit"
+        },
+        {
+          "name": "maxTransmissionBounce",
+          "types": [
+            "ANARI_INT32"
+          ],
+          "tags": [],
+          "minimum": 0,
+          "description": "maximum number of bounces through surfaces (refraction) of a path; unset: no limit"
+        },
+        {
+          "name": "maxVolumeBounce",
+          "types": [
+            "ANARI_INT32"
+          ],
+          "tags": [],
+          "minimum": 0,
+          "description": "maximum number of volume scattering bounces of a path; unset: no limit"
+        },
+        {
+          "name": "clampDirect",
+          "types": [
+            "ANARI_FLOAT32"
+          ],
+          "tags": [],
+          "minimum": 0.0,
+          "description": "clamp of the light which arrives at the camera hit: one contribution to a path is scaled to R+G+B <= 3 * value; 0 or unset: no clamp"
+        },
+        {
+          "name": "clampIndirect",
+          "types": [
+            "ANARI_FLOAT32"
+          ],
+          "tags": [],
+          "minimum": 0.0,
+          "description": "clamp of the light which arrives at later hits of a path: one contribution to a path is scaled to R+G+B <= 3 * value; 0 or unset: no clamp"
         }
       ]
     },

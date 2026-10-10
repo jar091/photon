@@ -14,6 +14,8 @@ struct BsdfSample {
   Vec3 f;
   f32 pdf{0.f};
   bool is_specular{false};
+  // Sampled from the diffuse lobe (for the diffuse bounce limit of a path).
+  bool is_diffuse{false};
 };
 
 KOKKOS_FUNCTION inline f32 saturate(f32 x)
@@ -415,6 +417,7 @@ KOKKOS_FUNCTION inline BsdfSample disney_bsdf_sample(const Material &mat,
 
   if (xi < p_diffuse) {
     auto s = sample_cosine_hemisphere(shading_n, rng);
+    out.is_diffuse = true;
     out.wi = s.direction;
     out.f = disney_bsdf_eval(mat, wo, out.wi, n, shading_n);
     out.pdf = disney_bsdf_pdf(mat, wo, out.wi, n, shading_n);

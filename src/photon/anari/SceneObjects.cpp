@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 #include <initializer_list>
+#include <limits>
 
 namespace photon::anari_device {
 
@@ -99,6 +100,9 @@ void Camera::commitParameters()
   m_data.height = getParam<float>("height", 1.f);
   m_data.aperture_radius = getParam<float>("apertureRadius", 0.f);
   m_data.focus_distance = getParam<float>("focusDistance", 1.f);
+  // clip planes of the camera rays; unset: no clipping
+  m_data.clip_near = getParam<float>("near", 0.f);
+  m_data.clip_far = getParam<float>("far", std::numeric_limits<float>::infinity());
 
   float4 region(0.f, 0.f, 1.f, 1.f);
   getParam("imageRegion", ANARI_FLOAT32_BOX2, &region);
@@ -143,6 +147,22 @@ void Renderer::commitParameters()
   // 'maxRayDepth' counts the indirect bounces, the path tracer the scattering
   // events that receive direct light.
   m_settings.max_depth = uint32_t(std::clamp(getParam<int>("maxRayDepth", 8), 0, 256)) + 1;
+  // Path length limits and clamps with the names and the meaning of Cycles.
+  // 'maxBounce' replaces 'maxRayDepth' when it is set (the same count); the
+  // limits per kind of bounce do not exist when they are not set.
+  auto limit = [&](const char *name) {
+    int value = -1;
+    return getParam(name, ANARI_INT32, &value) ? std::clamp(value, 0, 256) : -1;
+  };
+  const int maxBounce = limit("maxBounce");
+  if (maxBounce >= 0)
+    m_settings.max_depth = uint32_t(maxBounce) + 1;
+  m_settings.max_diffuse_bounces = limit("maxDiffuseBounce");
+  m_settings.max_glossy_bounces = limit("maxGlossyBounce");
+  m_settings.max_transmission_bounces = limit("maxTransmissionBounce");
+  m_settings.max_volume_bounces = limit("maxVolumeBounce");
+  m_settings.clamp_direct = std::max(getParam<float>("clampDirect", 0.f), 0.f);
+  m_settings.clamp_indirect = std::max(getParam<float>("clampIndirect", 0.f), 0.f);
   m_settings.throughput_clamp = getParam<float>("throughputClamp", 0.f);
   m_settings.adaptive_sampling = getParam<bool>("adaptiveSampling", false);
 }
@@ -362,9 +382,12 @@ void Material::commitParameters()
     m_clearcoat = getParam<float>("clearcoat", 0.f);
     m_clearcoatRoughness = getParam<float>("clearcoatRoughness", 0.f);
     m_thickness = getParam<float>("thickness", 0.f);
-    if (hasParam("normal") || hasParam("occlusion") || hasParam("clearcoatNormal")) {
+    // tangent-space normal map; the tangent frame follows from the texture
+    // coordinates of its sampler ('vertex.tangent' is not used)
+    m_normal = readParameter("normal", float4(0.5f, 0.5f, 1.f, 1.f));
+    if (hasParam("occlusion") || hasParam("clearcoatNormal")) {
       reportMessage(ANARI_SEVERITY_WARNING,
-          "photon ignores the 'normal', 'occlusion' and 'clearcoatNormal' maps of physicallyBased materials");
+          "photon ignores the 'occlusion' and 'clearcoatNormal' maps of physicallyBased materials");
     }
   } else {
     m_color = readParameter("color", float4(0.8f, 0.8f, 0.8f, 1.f));
@@ -388,7 +411,7 @@ void Material::commitParameters()
 
 void Material::finalize()
 {
-  for (const MaterialParameter *p : {&m_color, &m_opacity, &m_metallic, &m_roughness, &m_emissive, &m_transmission}) {
+  for (const MaterialParameter *p : {&m_color, &m_opacity, &m_metallic, &m_roughness, &m_emissive, &m_transmission, &m_normal}) {
     if (p->sampler && !p->sampler->isValid()) {
       reportMessage(
           ANARI_SEVERITY_WARNING, "material uses an invalid sampler, the default value of the parameter is used");
@@ -432,6 +455,7 @@ bridge::MaterialData Material::exportData(SamplerRegistry &registry) const
   m.roughness_src = exportSource(m_roughness, registry);
   m.emission_src = exportSource(m_emissive, registry);
   m.transmission_src = exportSource(m_transmission, registry);
+  m.normal_src = exportSource(m_normal, registry);
 
   m.alpha_mode = m_alphaMode;
   m.alpha_cutoff = m_alphaCutoff;
@@ -465,6 +489,7 @@ uint32_t Material::usedAttributes() const
   add(m_roughness);
   add(m_emissive);
   add(m_transmission);
+  add(m_normal);
   return mask;
 }
 

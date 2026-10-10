@@ -5,6 +5,7 @@
 // It only uses standard C++ types so neither side sees the headers of the other.
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -43,6 +44,7 @@ struct MaterialData
   ParamSourceData roughness_src;
   ParamSourceData emission_src;
   ParamSourceData transmission_src;
+  ParamSourceData normal_src; // tangent-space normal map, encoded as 0.5 + 0.5 n
 
   int alpha_mode{1}; // 0 = blend, 1 = opaque, 2 = mask
   float alpha_cutoff{0.5f};
@@ -135,6 +137,10 @@ struct CameraData
   float aperture_radius{0.f};
   float focus_distance{1.f};
   float image_region[4]{0.f, 0.f, 1.f, 1.f};
+  // Clip planes of the camera rays, distances along the direction;
+  // 0 and infinity: no clipping
+  float clip_near{0.f};
+  float clip_far{std::numeric_limits<float>::infinity()};
 };
 
 struct RenderSettings
@@ -152,6 +158,15 @@ struct RenderSettings
   float ambient_radiance{0.f};
   bool adaptive_sampling{false};
   float throughput_clamp{0.f}; // <= 0: off
+  // Bounces of one kind after the camera hit, as in Cycles; < 0: no limit.
+  int max_diffuse_bounces{-1};
+  int max_glossy_bounces{-1};
+  int max_transmission_bounces{-1};
+  int max_volume_bounces{-1};
+  // One light contribution to a path is scaled to R+G+B <= 3 * value: light at
+  // the camera hit (direct) and at later hits (indirect); <= 0: off.
+  float clamp_direct{0.f};
+  float clamp_indirect{0.f};
 };
 
 // The path tracer of one ANARI device: scene, acceleration structure and the

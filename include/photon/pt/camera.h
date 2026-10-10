@@ -17,6 +17,11 @@ struct Camera {
   f32 lens_radius{0.f};
   f32 focus_dist{1.f};
   bool is_ortho{false};
+  // Clip planes of the camera rays, perpendicular to the view direction (-w):
+  // distances along that direction, not along the ray. 0 and 1e30 mean no
+  // clipping. Rays which continue a path (shadow, bounce) are not clipped.
+  f32 clip_near{0.f};
+  f32 clip_far{1e30f};
 
   KOKKOS_FUNCTION static Camera make_pinhole(
       const Vec3 &look_from, const Vec3 &look_at, const Vec3 &vup, f32 vfov_degrees, f32 aspect)
@@ -103,6 +108,29 @@ struct Camera {
     raster_x = s * f32(width);
     raster_y = (1.f - t) * f32(height);
     return true;
+  }
+
+  // Interval [t_near, t_far] of a camera ray between the clip planes. The
+  // origins of camera rays (eye, lens samples, orthographic image plane) lie
+  // in the plane through 'origin' which is perpendicular to the view
+  // direction, so the planes are at clip / cos(angle to the view direction).
+  // The interval is empty (t_far < t_near) when nothing of the ray is left.
+  KOKKOS_FUNCTION void clip_range(const Vec3 &dir, f32 &t_near, f32 &t_far) const
+  {
+    t_near = 0.f;
+    t_far = 1e30f;
+    if (clip_near <= 0.f && clip_far >= 1e30f)
+      return;
+    const f32 cos_axis = dot(dir, w * -1.f);
+    if (cos_axis <= 1e-6f) {
+      t_near = 1.f;
+      t_far = 0.f;
+      return;
+    }
+    if (clip_near > 0.f)
+      t_near = clip_near / cos_axis;
+    if (clip_far < 1e30f)
+      t_far = clip_far / cos_axis;
   }
 
   KOKKOS_FUNCTION Ray ray(f32 s, f32 t) const
