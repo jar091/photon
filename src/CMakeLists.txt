@@ -163,12 +163,19 @@ if(PHOTON_OPTIX_READY)
   set(OPTIX_PTX_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/photon_optix.ptx")
   set(OPTIX_PTX_EMBED  "${CMAKE_CURRENT_BINARY_DIR}/photon_optix_ptx.cpp")
 
+  # CUDAToolkit_INCLUDE_DIRS is a list: CUDA 13 has two directories (include and
+  # include/cccl), and each one needs its own -I.
+  set(OPTIX_PTX_CUDA_INCLUDES "")
+  foreach(_photon_cuda_include IN LISTS CUDAToolkit_INCLUDE_DIRS)
+    list(APPEND OPTIX_PTX_CUDA_INCLUDES "-I${_photon_cuda_include}")
+  endforeach()
+
   add_custom_command(
     OUTPUT ${OPTIX_PTX_OUTPUT}
     COMMAND ${CUDAToolkit_NVCC_EXECUTABLE}
       -ptx
       -I${PHOTON_OPTIX_INCLUDE_DIR}
-      -I${CUDAToolkit_INCLUDE_DIRS}
+      ${OPTIX_PTX_CUDA_INCLUDES}
       --use_fast_math
       -O3
       ${OPTIX_PTX_SOURCE}
